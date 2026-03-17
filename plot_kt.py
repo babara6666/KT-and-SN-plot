@@ -19,6 +19,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.cm as cm
+import matplotlib.ticker
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -63,7 +64,7 @@ GROUP_STYLES = {
 MARKER_SIZE  = 6
 LINE_WIDTH   = 1.5
 CMAP_NAME    = "viridis"
-SQRT_AREA_PLOT = np.logspace(np.log10(10), np.log10(2000), 400)  # μm, for curve
+SQRT_AREA_PLOT = np.logspace(np.log10(10), np.log10(100000), 400)  # μm, for curve
 
 
 # ---------------------------------------------------------------------------
@@ -107,15 +108,15 @@ def el_haddad_curve(dk_th: float, Y: float, ds_e: float,
     Compute El Haddad K-T boundary Δσ_th for an array of sqrt_area values (μm).
 
     Using Murakami's √area model:
-        √(π·a) ≡ sqrt_area [m^0.5]  →  sqrt_area_m = sqrt_area_μm × 1e-6
+        a = sq_m² / π,  where sq_m = sqrt_area_μm × 1e-6  [m^0.5]
 
     El Haddad:
-        a₀_sq = ΔK_th / (Y · Δσ_e)           [m^0.5]
-        Δσ_th = ΔK_th / (Y · √(sq_m² + a₀_sq²))   [MPa]
+        a₀ = (1/π) × (ΔK_th / (Y · Δσ_e))²   [m]
+        Δσ_th = ΔK_th / (Y · √(π · (a + a₀)))  [MPa]
     """
-    sq_m   = sqrt_area_arr * 1e-6          # convert μm → m^0.5
-    a0_sq  = dk_th / (Y * ds_e)            # intrinsic length [m^0.5]
-    ds_th  = dk_th / (Y * np.sqrt(sq_m**2 + a0_sq**2))
+    a_eff = (sqrt_area_arr * 1e-6) ** 2 / np.pi      # area[m²]=(√area_μm×1e-6)², a_eff[m]
+    a0    = (1 / np.pi) * (dk_th / (Y * ds_e)) ** 2  # intrinsic crack length [m]
+    ds_th = dk_th / (Y * np.sqrt(np.pi * (a_eff + a0)))  # [MPa]
     return ds_th
 
 
@@ -138,8 +139,11 @@ def make_fig():
 def style_axes(ax, title_suffix=""):
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlim(10, 2000)
+    ax.set_xlim(10, 100000)
     ax.set_ylim(10, 1000)
+    ax.yaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
+    ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    ax.set_yticks([10, 20, 50, 100, 200, 500, 1000])
     ax.set_xlabel(r"$\sqrt{\mathrm{area}}$ (μm)", fontsize=9)
     ax.set_ylabel(r"$\Delta\sigma$ (MPa)", fontsize=9)
     ax.grid(which="major", color="lightgrey", linestyle="-",  linewidth=0.6, zorder=0)

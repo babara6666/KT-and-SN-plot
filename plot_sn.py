@@ -147,9 +147,12 @@ def main():
         log_N = np.log10(failed["cycles"].values.astype(float))
         log_s = np.log10(failed["stress_max_MPa"].values.astype(float))
         b, log_sf = basquin_fit(log_N, log_s)
+        print(f"  {grp}: b = {b:.4f}, σ'f = {10**log_sf:.1f} MPa")
 
-        # Extrapolate across full x range
-        N_fit = np.logspace(3, 7, 300)
+        # Fit line spans each group's own data range only
+        N_min = failed["cycles"].min()
+        N_max = RUNOUT_LIMIT
+        N_fit = np.logspace(np.log10(N_min), np.log10(N_max), 300)
         s_fit = 10 ** (log_sf + b * np.log10(N_fit))
         ax.plot(N_fit, s_fit, color=color, lw=LINE_WIDTH, linestyle="-", zorder=2)
 
