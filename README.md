@@ -1,8 +1,6 @@
 # Fatigue Data Visualisation Tool Suite
 
-**AUT Master's Dissertation — Fatigue Analysis of LPBF Co-29Cr-6Mo Alloy**
-
-Two standalone Python scripts for generating publication-quality fatigue plots:
+Two standalone Python scripts for generating publication-quality fatigue plots from tensile fatigue test data:
 
 | Script | Output |
 |--------|--------|
@@ -49,8 +47,8 @@ project_root/
 
 | Column | Type | Unit | Description |
 |--------|------|------|-------------|
-| `specimen_id` | string | — | Unique specimen label, e.g. `180H1` |
-| `group` | string | — | Condition label, e.g. `180W BD//CD` |
+| `specimen_id` | string | — | Unique specimen label, e.g. `GroupA-1` |
+| `group` | string | — | Condition label, e.g. `GroupA BD//CD` |
 | `stress_max_MPa` | float | MPa | Maximum applied stress σ_max |
 | `cycles` | integer | — | Cycles to failure (or run-out limit) |
 | `runout` | integer | 0 or 1 | `1` = run-out (not failed); `0` = failed |
@@ -59,11 +57,11 @@ project_root/
 
 ```csv
 specimen_id,group,stress_max_MPa,cycles,runout
-180H1,180W BD//CD,900,1000,0
-180H2,180W BD//CD,800,10000,0
-180H7,180W BD//CD,400,100000,0
-180H8,180W BD//CD,350,1000000,1
-180V1,180W BD⊥CD,900,900,0
+A-H1,GroupA BD//CD,950,2300,0
+A-H2,GroupA BD//CD,820,18000,0
+A-H7,GroupA BD//CD,430,780000,0
+A-H8,GroupA BD//CD,380,1000000,1
+A-V1,GroupA BD⊥CD,910,1900,0
 ...
 ```
 
@@ -71,10 +69,10 @@ specimen_id,group,stress_max_MPa,cycles,runout
 
 | Group name | Colour | Marker |
 |------------|--------|--------|
-| `180W BD//CD` | Blue | Diamond |
-| `180W BD⊥CD` | Red | Triangle |
-| `320W BD//CD` | Green | Square |
-| `320W BD⊥CD` | Magenta | Circle |
+| `GroupA BD//CD` | Blue | Diamond |
+| `GroupA BD⊥CD` | Red | Triangle |
+| `GroupB BD//CD` | Green | Square |
+| `GroupB BD⊥CD` | Magenta | Circle |
 
 > The script auto-detects groups from the CSV — additional groups will be assigned default styles automatically.
 
@@ -95,10 +93,10 @@ specimen_id,group,stress_max_MPa,cycles,runout
 
 ```csv
 specimen_id,group,stress_max_MPa,sqrt_area,Nf_cycles,runout
-180H1,180W BD//CD,900,220,1000,0
-180H2,180W BD//CD,800,150,10000,0
-180H8,180W BD//CD,350,150,1000000,1
-180V1,180W BD⊥CD,900,220,900,0
+A-H1,GroupA BD//CD,950,210,2300,0
+A-H2,GroupA BD//CD,820,170,18000,0
+A-H8,GroupA BD//CD,380,160,1000000,1
+A-V1,GroupA BD⊥CD,910,230,1900,0
 ...
 ```
 
@@ -108,14 +106,22 @@ specimen_id,group,stress_max_MPa,sqrt_area,Nf_cycles,runout
 
 ## Key Physical Parameters (hardcoded in `plot_kt.py`)
 
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| Stress ratio *R* | 0.1 | — |
-| Run-out limit | 10⁶ cycles | — |
-| ΔK_th — 180W BD//CD | 6.2 MPa·m½ | Anuar et al. (2021) |
-| ΔK_th — 180W BD⊥CD | 4.9 MPa·m½ | Anuar et al. (2021) |
-| ΔK_th — 320W BD//CD | 6.7 MPa·m½ | Anuar et al. (2021) |
-| ΔK_th — 320W BD⊥CD | 5.2 MPa·m½ | Anuar et al. (2021) |
+The ΔK_th values must be updated in `plot_kt.py` to match your material and test conditions before running. Locate the `DELTA_K_TH` dictionary near the top of the file:
+
+```python
+DELTA_K_TH = {
+    "GroupA BD//CD": <value>,   # MPa·m½
+    "GroupA BD⊥CD":  <value>,   # MPa·m½
+    "GroupB BD//CD": <value>,   # MPa·m½
+    "GroupB BD⊥CD":  <value>,   # MPa·m½
+}
+```
+
+| Parameter | Description |
+|-----------|-------------|
+| Stress ratio *R* | Set in `R_RATIO` (default: 0.1) |
+| Run-out limit | Set in `RUNOUT_LIMIT` (default: 10⁶ cycles) |
+| ΔK_th | Threshold stress intensity range per condition — update `DELTA_K_TH` to match your literature/experimental values |
 
 The smooth-specimen fatigue limit **Δσ_e** is derived automatically from each condition's run-out specimen: `Δσ_e = stress_max_MPa(run-out) × (1 − R)`.
 
@@ -132,19 +138,18 @@ python plot_kt.py
 
 ```
 kt_output/
-├── KT_Y050_180H.png      Y=0.50, 180W BD//CD
-├── KT_Y050_180V.png      Y=0.50, 180W BD⊥CD
-├── KT_Y050_320H.png      Y=0.50, 320W BD//CD
-├── KT_Y050_320V.png      Y=0.50, 320W BD⊥CD
-├── KT_Y050_combined.png  Y=0.50, all conditions
-├── KT_Y065_180H.png      Y=0.65, 180W BD//CD
-├── KT_Y065_180V.png      Y=0.65, 180W BD⊥CD
-├── KT_Y065_320H.png      Y=0.65, 320W BD//CD
-├── KT_Y065_320V.png      Y=0.65, 320W BD⊥CD
-└── KT_Y065_combined.png  Y=0.65, all conditions
+├── KT_Y050_GroupAH.png      Y=0.50, GroupA BD//CD
+├── KT_Y050_GroupAV.png      Y=0.50, GroupA BD⊥CD
+├── KT_Y050_GroupBH.png      Y=0.50, GroupB BD//CD
+├── KT_Y050_GroupBV.png      Y=0.50, GroupB BD⊥CD
+├── KT_Y050_combined.png     Y=0.50, all conditions
+├── KT_Y065_GroupAH.png      Y=0.65, GroupA BD//CD
+├── KT_Y065_GroupAV.png      Y=0.65, GroupA BD⊥CD
+├── KT_Y065_GroupBH.png      Y=0.65, GroupB BD//CD
+├── KT_Y065_GroupBV.png      Y=0.65, GroupB BD⊥CD
+└── KT_Y065_combined.png     Y=0.65, all conditions
 ```
 
 ---
 
-*Auckland University of Technology — Department of Mechanical Engineering*
-*ΔK_th values: Anuar et al. (2021), J. Mech. Behav. Biomed. Mater. 123, 104741*
+*ΔK_th values should be sourced from literature or experimental measurements appropriate to your material system.*
