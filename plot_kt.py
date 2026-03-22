@@ -7,8 +7,8 @@ Reads kt_input/kt_data.csv and produces 10 PNG files in kt_output/:
   - 1 combined plot × 2 Y values               = 2 files
   Total = 10 files
 
-El Haddad short-crack correction is applied using hardcoded ΔK_th values
-(Anuar et al. 2021) and Δσ_e derived from each condition's run-out specimen.
+Original bilinear K-T boundary: horizontal fatigue-limit line meeting the
+LEFM slope at the intersection point, using ΔK_th values from Anuar et al. (2021).
 """
 
 from pathlib import Path
@@ -102,22 +102,40 @@ def delta_sigma_e(group_df: pd.DataFrame) -> float:
     return s * (1 - R_RATIO)
 
 
-def el_haddad_curve(dk_th: float, Y: float, ds_e: float,
-                    sqrt_area_arr: np.ndarray) -> np.ndarray:
+def kt_boundary(dk_th: float, Y: float, ds_e: float):
     """
-    Compute El Haddad K-T boundary Δσ_th for an array of sqrt_area values (μm).
+    Compute the original bilinear Kitagawa-Takahashi boundary.
 
-    Using Murakami's √area model:
-        a = sq_m² / π,  where sq_m = sqrt_area_μm × 1e-6  [m^0.5]
+    Using Murakami's √area model (√area in μm on x-axis):
+        LEFM line:  Δσ = ΔK_th / (Y · √(π · √area_m))
+                    where √area_m = √area_μm × 1e-6  [m]
+        Horizontal: Δσ = Δσ_e
 
-    El Haddad:
-        a₀ = (1/π) × (ΔK_th / (Y · Δσ_e))²   [m]
-        Δσ_th = ΔK_th / (Y · √(π · (a + a₀)))  [MPa]
+    Intersection:
+        √area* = (1/π) · (ΔK_th / (Y · Δσ_e))² × 1e6  [μm]
+
+    Returns (x_horiz, y_horiz, x_lefm, y_lefm) — two segments to plot.
     """
-    a_eff = (sqrt_area_arr * 1e-6) ** 2 / np.pi      # area[m²]=(√area_μm×1e-6)², a_eff[m]
-    a0    = (1 / np.pi) * (dk_th / (Y * ds_e)) ** 2  # intrinsic crack length [m]
-    ds_th = dk_th / (Y * np.sqrt(np.pi * (a_eff + a0)))  # [MPa]
-    return ds_th
+    x_min = SQRT_AREA_PLOT[0]
+    x_max = SQRT_AREA_PLOT[-1]
+
+    sqrt_area_star = (1.0 / np.pi) * (dk_th / (Y * ds_e)) ** 2 * 1e6  # μm
+
+    # Horizontal segment: from x_min to intersection (clipped to plot range)
+    x_star_clipped = min(max(sqrt_area_star, x_min), x_max)
+    x_horiz = np.array([x_min, x_star_clipped])
+    y_horiz = np.array([ds_e, ds_e])
+
+    # LEFM segment: from intersection to x_max (clipped to plot range)
+    if sqrt_area_star < x_max:
+        x_start = max(sqrt_area_star, x_min)
+        x_lefm = np.logspace(np.log10(x_start), np.log10(x_max), 200)
+        y_lefm = dk_th / (Y * np.sqrt(np.pi * x_lefm * 1e-6))
+    else:
+        x_lefm = np.array([])
+        y_lefm = np.array([])
+
+    return x_horiz, y_horiz, x_lefm, y_lefm
 
 
 def abbreviated_id(specimen_id: str) -> str:
@@ -178,13 +196,16 @@ def plot_individual(grp: str, gdf: pd.DataFrame, Y: float,
     marker = GROUP_STYLES.get(grp, {}).get("marker", "o")
 
     ds_e   = delta_sigma_e(gdf)
-    curve  = el_haddad_curve(dk_th, Y, ds_e, SQRT_AREA_PLOT)
+    x_horiz, y_horiz, x_lefm, y_lefm = kt_boundary(dk_th, Y, ds_e)
 
     fig, ax = make_fig()
 
-    # K-T boundary line
-    ax.plot(SQRT_AREA_PLOT, curve, color=color, lw=LINE_WIDTH,
+    # K-T bilinear boundary
+    ax.plot(x_horiz, y_horiz, color=color, lw=LINE_WIDTH,
             linestyle="-", label=f"K-T boundary ({grp})", zorder=3)
+    if x_lefm.size:
+        ax.plot(x_lefm, y_lefm, color=color, lw=LINE_WIDTH,
+                linestyle="-", zorder=3)
 
     # Data points
     for _, row in gdf.iterrows():
@@ -246,11 +267,14 @@ def plot_combined(df: pd.DataFrame, groups: list, Y: float,
         color  = GROUP_STYLES.get(grp, {}).get("color", "black")
         marker = GROUP_STYLES.get(grp, {}).get("marker", "o")
         ds_e   = delta_sigma_e(gdf)
-        curve  = el_haddad_curve(dk_th, Y, ds_e, SQRT_AREA_PLOT)
+        x_horiz, y_horiz, x_lefm, y_lefm = kt_boundary(dk_th, Y, ds_e)
 
-        # K-T boundary line
-        ax.plot(SQRT_AREA_PLOT, curve, color=color, lw=LINE_WIDTH,
+        # K-T bilinear boundary
+        ax.plot(x_horiz, y_horiz, color=color, lw=LINE_WIDTH,
                 linestyle="-", label=grp, zorder=3)
+        if x_lefm.size:
+            ax.plot(x_lefm, y_lefm, color=color, lw=LINE_WIDTH,
+                    linestyle="-", zorder=3)
 
         # Data points
         for _, row in gdf.iterrows():

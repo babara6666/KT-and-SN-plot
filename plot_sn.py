@@ -3,7 +3,7 @@ plot_sn.py — S-N Curve Plotter
 AUT Master's Dissertation: Fatigue Analysis of LPBF Co-29Cr-6Mo Alloy
 
 Reads sn_input/fatigue_data.csv and produces a single log-log S-N plot
-(sn_output/SN_curve.png) with Basquin regression per group.
+(sn_output/SN_curve.png).
 """
 
 from pathlib import Path
@@ -24,7 +24,6 @@ FIG_W_MM, FIG_H_MM = 180, 130    # figure dimensions in mm
 ROOT = Path(__file__).parent
 SN_INPUT  = ROOT / "sn_input"  / "fatigue_data.csv"
 SN_OUTPUT = ROOT / "sn_output"
-BASQUIN_CSV = SN_OUTPUT / "basquin_coefficients.csv"
 
 REQUIRED_COLS = {"specimen_id", "group", "stress_max_MPa", "cycles", "runout"}
 
@@ -55,17 +54,6 @@ def load_data(csv_path: Path) -> pd.DataFrame:
     return df
 
 
-def basquin_fit(log_N: np.ndarray, log_s: np.ndarray):
-    """Return (b, log10_sigma_f_prime) from polyfit(log_N, log_s, 1)."""
-    coeffs = np.polyfit(log_N, log_s, 1)   # [slope, intercept] = [b, log10_sf]
-    return coeffs[0], coeffs[1]
-
-
-def sigma_from_basquin(b: float, log_sf: float, N: float) -> float:
-    """Predict σ_max at given N using Basquin relation."""
-    return 10 ** (log_sf + b * np.log10(N))
-
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -92,8 +80,6 @@ def main():
         dpi=DPI,
         facecolor="white",
     )
-
-    basquin_records = []
 
     for idx, grp in enumerate(ordered_groups):
         gdf = df[df["group"] == grp].copy()
@@ -138,30 +124,6 @@ def main():
                 arrowprops=dict(arrowstyle="->", color=color, lw=LINE_WIDTH),
             )
 
-        # ---- Basquin regression ----
-        if len(failed) < 2:
-            print(f"Warning: group '{grp}' has fewer than 2 failed specimens — skipping regression.")
-            basquin_records.append({"group": grp, "sigma_f_prime": None, "b": None})
-            continue
-
-        log_N = np.log10(failed["cycles"].values.astype(float))
-        log_s = np.log10(failed["stress_max_MPa"].values.astype(float))
-        b, log_sf = basquin_fit(log_N, log_s)
-        print(f"  {grp}: b = {b:.4f}, σ'f = {10**log_sf:.1f} MPa")
-
-        # Fit line spans each group's own data range only
-        N_min = failed["cycles"].min()
-        N_max = RUNOUT_LIMIT
-        N_fit = np.logspace(np.log10(N_min), np.log10(N_max), 300)
-        s_fit = 10 ** (log_sf + b * np.log10(N_fit))
-        ax.plot(N_fit, s_fit, color=color, lw=LINE_WIDTH, linestyle="-", zorder=2)
-
-        basquin_records.append({
-            "group": grp,
-            "sigma_f_prime": 10 ** log_sf,
-            "b": b,
-        })
-
     # ---- Axes ----
     ax.set_xscale("log")
     ax.set_yscale("log")
@@ -199,11 +161,6 @@ def main():
     fig.savefig(out_path, dpi=DPI, bbox_inches="tight", facecolor="white")
     plt.close(fig)
     print(f"Saved: {out_path}")
-
-    # ---- Export Basquin coefficients ----
-    bdf = pd.DataFrame(basquin_records)
-    bdf.to_csv(BASQUIN_CSV, index=False)
-    print(f"Saved: {BASQUIN_CSV}")
 
 
 if __name__ == "__main__":
