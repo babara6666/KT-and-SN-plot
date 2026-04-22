@@ -1,17 +1,13 @@
 """
-plot_kt.py — Kitagawa-Takahashi (K-T) Diagram Plotter
-AUT Master's Dissertation: Fatigue Analysis of LPBF Co-29Cr-6Mo Alloy
-
-Reads kt_input/kt_data.csv and produces 10 PNG files in kt_output/:
-  - 4 individual condition plots × 2 Y values  = 8 files
-  - 1 combined plot × 2 Y values               = 2 files
-  Total = 10 files
-
-Original bilinear K-T boundary: horizontal fatigue-limit line meeting the
-LEFM slope at the intersection point, using ΔK_th values from Anuar et al. (2021).
+plot_kt.py — Kitagawa-Takahashi Diagram Plotter
+Reads 'D:/DownloadD/WAAM/LPBF/SN force.xlsx' and produces 6 PNG files in kt_output/:
+  KT_Y050_combined.png  KT_Y065_combined.png  — all four groups
+  KT_Y050_180W.png      KT_Y065_180W.png      — 180W groups overlaid
+  KT_Y050_320W.png      KT_Y065_320W.png      — 320W groups overlaid
 """
 
 from pathlib import Path
+import re
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -19,336 +15,213 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.cm as cm
-import matplotlib.ticker
+import matplotlib.ticker as ticker
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+RUNOUT_LIMIT = 10_000_000
+R_RATIO      = 0.1
 Y_VALUES     = [0.5, 0.65]
-R_RATIO      = 0.1          # stress ratio R
-RUNOUT_LIMIT = 1_000_000    # cycles — specimens at this count are run-outs
-
-DPI = 300
+DPI          = 300
 FIG_W_MM, FIG_H_MM = 180, 130
+EXCEL_PATH   = Path("D:/DownloadD/WAAM/LPBF/SN force.xlsx")
+OUT_DIR      = Path(__file__).parent / "kt_output"
 
-ROOT      = Path(__file__).parent
-KT_INPUT  = ROOT / "kt_input"  / "kt_data.csv"
-KT_OUTPUT = ROOT / "kt_output"
+# Fatigue limits Δσ_e [MPa] — user-specified
+FATIGUE_LIMITS = {
+    "180W BD//LD": 250,
+    "180W BD⊥LD": 400,
+    "320W BD//LD": 350,
+    "320W BD⊥LD": 500,
+}
 
-REQUIRED_COLS = {"specimen_id", "group", "stress_max_MPa", "sqrt_area", "Nf_cycles", "runout"}
-
-# ΔK_th per condition [MPa·m^0.5] — Anuar et al. (2021)
+# Threshold SIF range ΔK_th [MPa·√m] — Anuar et al. (2021)
 DELTA_K_TH = {
-    "180W BD//CD": 6.2,
-    "180W BD⊥CD": 4.9,
-    "320W BD//CD": 6.7,
-    "320W BD⊥CD": 5.2,
+    "180W BD//LD": 6.2,
+    "180W BD⊥LD": 4.9,
+    "320W BD//LD": 6.7,
+    "320W BD⊥LD": 5.2,
 }
 
-# Short filename suffix per condition
-GROUP_CODES = {
-    "180W BD//CD": "180H",
-    "180W BD⊥CD": "180V",
-    "320W BD//CD": "320H",
-    "320W BD⊥CD": "320V",
-}
-
-# Visual styles (marker + line colour) — shared with S-N plot
 GROUP_STYLES = {
-    "180W BD//CD": {"color": "blue",    "marker": "D"},
-    "180W BD⊥CD": {"color": "red",     "marker": "^"},
-    "320W BD//CD": {"color": "green",   "marker": "s"},
-    "320W BD⊥CD": {"color": "magenta", "marker": "o"},
+    "180W BD//LD": {"color": "blue",    "marker": "D"},
+    "180W BD⊥LD": {"color": "red",     "marker": "^"},
+    "320W BD//LD": {"color": "green",   "marker": "s"},
+    "320W BD⊥LD": {"color": "magenta", "marker": "o"},
+}
+
+WATTAGE_GROUPS = {
+    "180W": ["180W BD//LD", "180W BD⊥LD"],
+    "320W": ["320W BD//LD", "320W BD⊥LD"],
 }
 
 MARKER_SIZE  = 6
 LINE_WIDTH   = 1.5
-CMAP_NAME    = "viridis"
-SQRT_AREA_PLOT = np.logspace(np.log10(10), np.log10(100000), 400)  # μm, for curve
+CMAP_NAME    = "RdYlBu"   # warm (red, low Nf) → cool (blue, high Nf)
+CBAR_LOG_MIN = 4.0         # log10(1e4)
+CBAR_LOG_MAX = 7.0         # log10(1e7) — matches RUNOUT_LIMIT
+ARROW_SCALE  = 1.15
+X_CURVE      = np.logspace(np.log10(50), np.log10(2000), 400)  # µm
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def load_data(csv_path: Path) -> pd.DataFrame:
-    if not csv_path.exists():
-        raise FileNotFoundError(f"Input CSV not found: {csv_path}")
-    df = pd.read_csv(csv_path)
-    missing = REQUIRED_COLS - set(df.columns)
-    if missing:
-        raise ValueError(f"CSV missing required columns: {missing}")
-    df["runout"] = df["runout"].astype(int)
-    # Drop rows with non-positive sqrt_area or Nf_cycles
-    bad = df[(df["sqrt_area"] <= 0) | (df["Nf_cycles"] <= 0)]
-    if not bad.empty:
-        print(f"Warning: dropping {len(bad)} rows with non-positive sqrt_area or Nf_cycles: "
-              f"{list(bad['specimen_id'])}")
-        df = df[(df["sqrt_area"] > 0) & (df["Nf_cycles"] > 0)].copy()
-    return df
+def fix_group(g):
+    if "//" in g:
+        return g
+    prefix = g.split("W")[0] + "W"
+    return f"{prefix} BD⊥LD"
 
 
-def delta_sigma_e(group_df: pd.DataFrame) -> float:
-    """
-    Fatigue limit Δσ_e for a condition.
-    Taken from the run-out specimen's stress_max_MPa × (1 − R).
-    """
-    ro = group_df[group_df["runout"] == 1]
-    if ro.empty:
-        # Fallback: minimum stress in group
-        s = group_df["stress_max_MPa"].min()
-        print(f"Warning: no run-out specimen found — using min stress {s} MPa as Δσ_e reference.")
-    else:
-        s = ro["stress_max_MPa"].iloc[0]
-    return s * (1 - R_RATIO)
+def shorten_id(specimen_id):
+    m = re.match(r"^\d+([A-Za-z].*)", str(specimen_id))
+    return m.group(1) if m else str(specimen_id)
 
 
-def kt_boundary(dk_th: float, Y: float, ds_e: float):
-    """
-    Compute the original bilinear Kitagawa-Takahashi boundary.
+def kt_boundary(dk_th, Y, ds_e):
+    """Bilinear K-T boundary. Returns horizontal and LEFM segments."""
+    x_min, x_max   = X_CURVE[0], X_CURVE[-1]
+    sqrt_area_star  = (1.0 / np.pi) * (dk_th / (Y * ds_e)) ** 2 * 1e6  # µm
+    x_star          = min(max(sqrt_area_star, x_min), x_max)
 
-    Using Murakami's √area model (√area in μm on x-axis):
-        LEFM line:  Δσ = ΔK_th / (Y · √(π · √area_m))
-                    where √area_m = √area_μm × 1e-6  [m]
-        Horizontal: Δσ = Δσ_e
+    x_horiz = np.array([x_min, x_star])
+    y_horiz = np.array([ds_e,  ds_e])
 
-    Intersection:
-        √area* = (1/π) · (ΔK_th / (Y · Δσ_e))² × 1e6  [μm]
-
-    Returns (x_horiz, y_horiz, x_lefm, y_lefm) — two segments to plot.
-    """
-    x_min = SQRT_AREA_PLOT[0]
-    x_max = SQRT_AREA_PLOT[-1]
-
-    sqrt_area_star = (1.0 / np.pi) * (dk_th / (Y * ds_e)) ** 2 * 1e6  # μm
-
-    # Horizontal segment: from x_min to intersection (clipped to plot range)
-    x_star_clipped = min(max(sqrt_area_star, x_min), x_max)
-    x_horiz = np.array([x_min, x_star_clipped])
-    y_horiz = np.array([ds_e, ds_e])
-
-    # LEFM segment: from intersection to x_max (clipped to plot range)
     if sqrt_area_star < x_max:
-        x_start = max(sqrt_area_star, x_min)
-        x_lefm = np.logspace(np.log10(x_start), np.log10(x_max), 200)
+        x_lefm = np.logspace(np.log10(max(sqrt_area_star, x_min)),
+                              np.log10(x_max), 200)
         y_lefm = dk_th / (Y * np.sqrt(np.pi * x_lefm * 1e-6))
     else:
-        x_lefm = np.array([])
-        y_lefm = np.array([])
+        x_lefm, y_lefm = np.array([]), np.array([])
 
     return x_horiz, y_horiz, x_lefm, y_lefm
 
 
-def abbreviated_id(specimen_id: str) -> str:
-    """Strip the numeric power prefix from specimen ID. e.g. '180H3' → 'H3'."""
-    # Remove leading digits (180, 320)
-    import re
-    m = re.match(r"^\d+([A-Za-z].*)", specimen_id)
-    return m.group(1) if m else specimen_id
+def load_data():
+    df = pd.read_excel(EXCEL_PATH)
+    df = df[df["stress_max_MPa"] > 0].dropna(subset=["cycles"]).copy()
+    df["group"]       = df["group"].apply(fix_group)
+    df["runout"]      = (df["cycles"] >= RUNOUT_LIMIT).astype(int)
+    df["sqrt_area"]   = pd.to_numeric(df["sqrt area"], errors="coerce")
+    df["delta_sigma"] = df["stress_max_MPa"] * (1 - R_RATIO)
+    df = df[df["sqrt_area"] > 0].copy()
+    return df
 
 
-def make_fig():
-    return plt.subplots(
-        figsize=(FIG_W_MM / 25.4, FIG_H_MM / 25.4),
-        dpi=DPI,
-        facecolor="white",
-    )
-
-
-def style_axes(ax, title_suffix=""):
+def style_ax(ax, Y):
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlim(10, 100000)
-    ax.set_ylim(10, 1000)
-    ax.yaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
-    ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
-    ax.set_yticks([10, 20, 50, 100, 200, 500, 1000])
+    ax.set_xlim(50, 2000)
+    ax.set_ylim(100, 1000)
     ax.set_xlabel(r"$\sqrt{\mathrm{area}}$ (μm)", fontsize=9)
     ax.set_ylabel(r"$\Delta\sigma$ (MPa)", fontsize=9)
+    ax.yaxis.set_major_formatter(ticker.ScalarFormatter())
+    ax.yaxis.set_minor_formatter(ticker.NullFormatter())
+    ax.set_yticks([100, 200, 300, 400, 500, 600, 700, 800, 900, 1000])
     ax.grid(which="major", color="lightgrey", linestyle="-",  linewidth=0.6, zorder=0)
     ax.grid(which="minor", color="lightgrey", linestyle="--", linewidth=0.3, zorder=0)
     ax.minorticks_on()
+    ax.text(0.04, 0.06, f"$Y$ = {Y:.2f},  $R$ = {R_RATIO}",
+            transform=ax.transAxes, fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                      edgecolor="grey", alpha=0.8))
 
 
-def add_colorbar(fig, ax, norm, label="$N_f$ cycles"):
+def add_colorbar(fig, ax, norm):
     sm = cm.ScalarMappable(cmap=CMAP_NAME, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax, pad=0.02)
-    cbar.set_label(label, fontsize=8)
-    # Show actual cycle values on colourbar ticks
-    tick_vals = [1e3, 1e4, 1e5, 1e6]
+    cbar.set_label("$N_f$ (cycles)", fontsize=8)
+    tick_vals = [1e4, 1e5, 1e6, 1e7]
     cbar.set_ticks([np.log10(v) for v in tick_vals])
-    cbar.set_ticklabels([f"$10^{int(np.log10(v))}$" for v in tick_vals])
+    cbar.set_ticklabels(["$10^4$", "$10^5$", "$10^6$", "$10^7$"])
 
 
-# ---------------------------------------------------------------------------
-# Plot builders
-# ---------------------------------------------------------------------------
-def plot_individual(grp: str, gdf: pd.DataFrame, Y: float,
-                    norm: mcolors.Normalize, cmap, y_tag: str):
-    """Generate one individual condition K-T plot and save it."""
-    dk_th = DELTA_K_TH.get(grp)
-    if dk_th is None:
-        print(f"Warning: no ΔK_th for group '{grp}' — skipping individual plot.")
-        return
-
-    code   = GROUP_CODES.get(grp, grp.replace(" ", "_"))
-    color  = GROUP_STYLES.get(grp, {}).get("color", "black")
-    marker = GROUP_STYLES.get(grp, {}).get("marker", "o")
-
-    ds_e   = delta_sigma_e(gdf)
-    x_horiz, y_horiz, x_lefm, y_lefm = kt_boundary(dk_th, Y, ds_e)
-
-    fig, ax = make_fig()
-
-    # K-T bilinear boundary
-    ax.plot(x_horiz, y_horiz, color=color, lw=LINE_WIDTH,
-            linestyle="-", label=f"K-T boundary ({grp})", zorder=3)
-    if x_lefm.size:
-        ax.plot(x_lefm, y_lefm, color=color, lw=LINE_WIDTH,
-                linestyle="-", zorder=3)
-
-    # Data points
-    for _, row in gdf.iterrows():
-        c_val = cmap(norm(np.log10(row["Nf_cycles"])))
-        ds    = row["stress_max_MPa"] * (1 - R_RATIO)
-        is_ro = row["runout"] == 1
-
-        ax.scatter(
-            row["sqrt_area"], ds,
-            color=c_val,
-            marker=marker,
-            s=MARKER_SIZE ** 2,
-            edgecolors=color if is_ro else "none",
-            linewidths=0.8,
-            zorder=4,
-        )
-        # Abbreviated label
-        ax.annotate(
-            abbreviated_id(str(row["specimen_id"])),
-            xy=(row["sqrt_area"], ds),
-            xytext=(3, 3), textcoords="offset points",
-            fontsize=6, color="dimgrey",
-        )
-        # Run-out arrow
-        if is_ro:
-            ax.annotate(
-                "",
-                xy=(row["sqrt_area"] * 1.15, ds),
-                xytext=(row["sqrt_area"], ds),
-                arrowprops=dict(arrowstyle="->", color=color, lw=0.9),
-            )
-
-    style_axes(ax)
-    ax.text(0.04, 0.06, f"$Y$ = {Y:.2f}",
-            transform=ax.transAxes, fontsize=8,
-            bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
-                      edgecolor="grey", alpha=0.8))
-    ax.legend(fontsize=7, loc="upper right")
-    add_colorbar(fig, ax, norm)
-
-    fig.tight_layout()
-    out = KT_OUTPUT / f"KT_{y_tag}_{code}.png"
-    fig.savefig(out, dpi=DPI, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    print(f"Saved: {out}")
-
-
-def plot_combined(df: pd.DataFrame, groups: list, Y: float,
-                  norm: mcolors.Normalize, cmap, y_tag: str):
-    """Generate the combined (all-conditions) K-T plot and save it."""
-    fig, ax = make_fig()
-
+def draw_groups(ax, fig, df, groups, Y, norm, cmap, show_wattage=True):
     for grp in groups:
-        gdf   = df[df["group"] == grp]
-        dk_th = DELTA_K_TH.get(grp)
-        if dk_th is None:
+        if grp not in df["group"].unique():
             continue
+        gdf    = df[df["group"] == grp]
+        color  = GROUP_STYLES[grp]["color"]
+        marker = GROUP_STYLES[grp]["marker"]
+        ds_e   = FATIGUE_LIMITS[grp]
+        dk_th  = DELTA_K_TH[grp]
+        # Strip "180W " / "320W " prefix for wattage-only plots, append H/V hint
+        if show_wattage:
+            legend_label = grp
+        else:
+            short = grp.split(" ", 1)[1]  # e.g. "BD//LD" or "BD⊥LD"
+            hint  = "(H)" if "//" in short else "(V)"
+            legend_label = f"{short}{hint}"
 
-        color  = GROUP_STYLES.get(grp, {}).get("color", "black")
-        marker = GROUP_STYLES.get(grp, {}).get("marker", "o")
-        ds_e   = delta_sigma_e(gdf)
         x_horiz, y_horiz, x_lefm, y_lefm = kt_boundary(dk_th, Y, ds_e)
-
-        # K-T bilinear boundary
-        ax.plot(x_horiz, y_horiz, color=color, lw=LINE_WIDTH,
-                linestyle="-", label=grp, zorder=3)
+        ax.plot(x_horiz, y_horiz, color=color, lw=LINE_WIDTH, label=legend_label, zorder=3)
         if x_lefm.size:
-            ax.plot(x_lefm, y_lefm, color=color, lw=LINE_WIDTH,
-                    linestyle="-", zorder=3)
+            ax.plot(x_lefm, y_lefm, color=color, lw=LINE_WIDTH, zorder=3)
 
-        # Data points
         for _, row in gdf.iterrows():
-            c_val = cmap(norm(np.log10(row["Nf_cycles"])))
-            ds    = row["stress_max_MPa"] * (1 - R_RATIO)
+            c_val = cmap(norm(np.log10(row["cycles"])))
             is_ro = row["runout"] == 1
-
-            ax.scatter(
-                row["sqrt_area"], ds,
-                color=c_val,
-                marker=marker,
-                s=MARKER_SIZE ** 2,
-                edgecolors=color if is_ro else "none",
-                linewidths=0.8,
-                zorder=4,
-            )
-            ax.annotate(
-                abbreviated_id(str(row["specimen_id"])),
-                xy=(row["sqrt_area"], ds),
-                xytext=(3, 3), textcoords="offset points",
-                fontsize=5, color="dimgrey",
-            )
+            ax.scatter(row["sqrt_area"], row["delta_sigma"],
+                       color=c_val, marker=marker, s=MARKER_SIZE**2,
+                       edgecolors=color if is_ro else "none",
+                       linewidths=0.8, zorder=4)
+            pt_label = str(row["specimen_id"]) if show_wattage else shorten_id(row["specimen_id"])
+            ax.annotate(pt_label,
+                        xy=(row["sqrt_area"], row["delta_sigma"]),
+                        xytext=(3, 3), textcoords="offset points",
+                        fontsize=6, color="dimgrey", zorder=5)
             if is_ro:
-                ax.annotate(
-                    "",
-                    xy=(row["sqrt_area"] * 1.15, ds),
-                    xytext=(row["sqrt_area"], ds),
-                    arrowprops=dict(arrowstyle="->", color=color, lw=0.9),
-                )
+                ax.annotate("",
+                    xy=(row["sqrt_area"] * ARROW_SCALE, row["delta_sigma"]),
+                    xytext=(row["sqrt_area"], row["delta_sigma"]),
+                    arrowprops=dict(arrowstyle="->", color=color, lw=0.9))
 
-    style_axes(ax)
-    ax.text(0.04, 0.06, f"$Y$ = {Y:.2f}",
-            transform=ax.transAxes, fontsize=8,
-            bbox=dict(boxstyle="round,pad=0.25", facecolor="white",
-                      edgecolor="grey", alpha=0.8))
-    ax.legend(fontsize=6, loc="upper right", framealpha=0.9)
+    style_ax(ax, Y)
+    ax.legend(fontsize=7, loc="upper right", framealpha=0.9)
     add_colorbar(fig, ax, norm)
 
+
+def save_fig(fig, path):
     fig.tight_layout()
-    out = KT_OUTPUT / f"KT_{y_tag}_combined.png"
-    fig.savefig(out, dpi=DPI, bbox_inches="tight", facecolor="white")
+    fig.savefig(path, dpi=DPI, bbox_inches="tight", facecolor="white")
     plt.close(fig)
-    print(f"Saved: {out}")
+    print(f"Saved: {path}")
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
-    KT_OUTPUT.mkdir(parents=True, exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    df = load_data()
 
-    df = load_data(KT_INPUT)
+    print("KT data:")
+    print(df[["specimen_id", "group", "stress_max_MPa", "delta_sigma",
+               "sqrt_area", "cycles", "runout"]].to_string(index=False))
 
-    # Ordered group list
-    groups_in_data = list(df["group"].unique())
-    ordered_groups = [g for g in GROUP_STYLES if g in groups_in_data]
-    unknown_groups = [g for g in groups_in_data if g not in GROUP_STYLES]
-    ordered_groups += unknown_groups
-
-    # Shared colourmap normalised to log10(Nf_cycles) range across all data
-    log_nf_all = np.log10(df["Nf_cycles"].values.astype(float))
-    norm = mcolors.Normalize(vmin=log_nf_all.min(), vmax=log_nf_all.max())
+    norm = mcolors.Normalize(vmin=CBAR_LOG_MIN, vmax=CBAR_LOG_MAX)
     cmap = matplotlib.colormaps[CMAP_NAME]
+
+    all_groups = [g for g in GROUP_STYLES if g in df["group"].unique()]
 
     for Y in Y_VALUES:
         y_tag = f"Y{int(Y * 100):03d}"   # 0.5 → 'Y050', 0.65 → 'Y065'
 
-        # Individual plots
-        for grp in ordered_groups:
-            gdf = df[df["group"] == grp].copy()
-            plot_individual(grp, gdf, Y, norm, cmap, y_tag)
+        # Combined: all groups — show full label with wattage
+        fig, ax = plt.subplots(figsize=(FIG_W_MM / 25.4, FIG_H_MM / 25.4),
+                               dpi=DPI, facecolor="white")
+        draw_groups(ax, fig, df, all_groups, Y, norm, cmap, show_wattage=True)
+        save_fig(fig, OUT_DIR / f"KT_{y_tag}_combined.png")
 
-        # Combined plot
-        plot_combined(df, ordered_groups, Y, norm, cmap, y_tag)
+        # Per wattage — strip wattage prefix from legend
+        for watt, groups in WATTAGE_GROUPS.items():
+            fig, ax = plt.subplots(figsize=(FIG_W_MM / 25.4, FIG_H_MM / 25.4),
+                                   dpi=DPI, facecolor="white")
+            draw_groups(ax, fig, df, groups, Y, norm, cmap, show_wattage=False)
+            save_fig(fig, OUT_DIR / f"KT_{y_tag}_{watt}.png")
 
 
 if __name__ == "__main__":
